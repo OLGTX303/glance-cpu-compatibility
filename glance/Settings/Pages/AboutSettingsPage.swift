@@ -22,7 +22,7 @@ struct AboutSettingsPage: View {
         let info = Bundle.main.infoDictionary
         let short = info?["CFBundleShortVersionString"] as? String ?? "1.0"
         let build = info?["CFBundleVersion"] as? String ?? "1"
-        return "Version \(short) (\(build))"
+        return "Version \(short) (\(build))" + (Bundle.main.object(forInfoDictionaryKey: "GlanceCPUCompatibility") as? Bool == true ? " · CPU compatibility" : "")
     }
 
     var body: some View {

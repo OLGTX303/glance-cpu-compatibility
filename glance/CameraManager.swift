@@ -6,7 +6,6 @@
 //
 
 @preconcurrency import AVFoundation
-import CoreImage
 import Observation
 
 enum CameraPermission {
@@ -15,11 +14,11 @@ enum CameraPermission {
     case denied
 }
 
-/// `source` is a `CIImage` — a lazy recipe, not rendered pixels — so holding onto it costs nothing until `renderCrop` uses it.
+/// Owns native pixels independently of the camera buffer; avoids deferred Core Image renders.
 struct CameraFrame {
     let id: UInt64
     let image: CGImage
-    let source: CIImage
+    let source: CGImage
     let sourceSize: CGSize
 }
 
@@ -160,78 +159,54 @@ final class CameraManager: NSObject {
     }
 
     fileprivate func publish(frame: CameraFrame) {
+        errorMessage = nil
         currentFrame = frame
     }
 
     /// Renders a native-resolution crop of `imageRect` from `frame.source`, for spoof-cue extraction which
     /// needs pixel detail (screen texture, moiré, gloss) the downscaled working frame throws away.
     nonisolated static func renderCrop(from frame: CameraFrame, imageRect: CGRect, maxEdge: CGFloat = 448) -> CGImage? {
-        let workingWidth = CGFloat(frame.image.width)
-        let workingHeight = CGFloat(frame.image.height)
-        guard workingWidth > 0, workingHeight > 0 else { return nil }
-        let scaleX = frame.sourceSize.width / workingWidth
-        let scaleY = frame.sourceSize.height / workingHeight
-
-        // Expand ~1.3x so device edges/bezels are captured for texture/moiré cues.
-        let expanded = imageRect.insetBy(dx: -imageRect.width * 0.15, dy: -imageRect.height * 0.15)
-
-        // Flip from `imageRect`'s top-left/y-down space to Core Image's bottom-left/y-up (reverse of FaceDetector.convertToImageSpace).
-        let nativeX = expanded.origin.x * scaleX
-        let nativeWidth = expanded.width * scaleX
-        let nativeHeight = expanded.height * scaleY
-        let nativeY = frame.sourceSize.height - (expanded.origin.y + expanded.height) * scaleY
-        var nativeRect = CGRect(x: nativeX, y: nativeY, width: nativeWidth, height: nativeHeight)
-
-        let sourceExtent = CGRect(origin: .zero, size: frame.sourceSize)
-        nativeRect = nativeRect.intersection(sourceExtent)
-        guard !nativeRect.isEmpty else { return nil }
-
-        var cropped = frame.source.cropped(to: nativeRect)
-            .transformed(by: CGAffineTransform(translationX: -nativeRect.minX, y: -nativeRect.minY))
-        let longEdge = max(nativeRect.width, nativeRect.height)
-        if longEdge > maxEdge {
-            let scale = maxEdge / longEdge
-            cropped = cropped.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        }
-
-        return cropRenderContext.createCGImage(cropped, from: cropped.extent)
+        CPUFrameRenderer.crop(frame.source,
+                              workingSize: CGSize(width: frame.image.width, height: frame.image.height),
+                              imageRect: imageRect, maxEdge: maxEdge)
     }
-
-    /// `CIContext` is expensive to create and safe to reuse concurrently. Explicitly `nonisolated` since a `static let`
-    /// on this `@MainActor` class would otherwise be main-actor-isolated, which the `nonisolated renderCrop` can't touch.
-    private nonisolated static let cropRenderContext = CIContext()
 
     /// Sample-buffer callbacks arrive on `sessionQueue`, off the main actor; this delegate converts there, then hops back.
     private final class FramePublisher: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
         weak var owner: CameraManager?
-        private let ciContext = CIContext()
         /// Detection only needs a modest resolution; the live preview renders from the capture session directly and
         /// is unaffected. The undownscaled `source` is kept alongside for callers needing native pixels (`renderCrop`).
-        private let maxLongEdge: CGFloat = 640
+        private let maxLongEdge: CGFloat = 1280
+        private var lastFrameTime: TimeInterval = 0
         private var nextFrameID: UInt64 = 0
+        private var reportedConversionFailure = false
 
         func captureOutput(
             _ output: AVCaptureOutput,
             didOutput sampleBuffer: CMSampleBuffer,
             from connection: AVCaptureConnection
         ) {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now - lastFrameTime >= 0.1 else { return }
+            lastFrameTime = now
             guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-            let sourceImage = CIImage(cvPixelBuffer: pixelBuffer)
-            let sourceExtent = sourceImage.extent
-            var ciImage = sourceImage
-            let longEdge = max(ciImage.extent.width, ciImage.extent.height)
-            if longEdge > maxLongEdge {
-                let scale = maxLongEdge / longEdge
-                ciImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            guard let images = CPUFrameRenderer.images(from: pixelBuffer, maxLongEdge: maxLongEdge) else {
+                if !reportedConversionFailure {
+                    reportedConversionFailure = true
+                    Task { @MainActor [weak owner] in
+                        owner?.errorMessage = "Camera preview works, but frame conversion failed."
+                    }
+                }
+                return
             }
-            guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+            reportedConversionFailure = false
 
             nextFrameID &+= 1
             let frame = CameraFrame(
                 id: nextFrameID,
-                image: cgImage,
-                source: sourceImage,
-                sourceSize: sourceExtent.size
+                image: images.working,
+                source: images.native,
+                sourceSize: CGSize(width: images.native.width, height: images.native.height)
             )
 
             Task { @MainActor [weak owner] in

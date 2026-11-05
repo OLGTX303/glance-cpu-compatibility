@@ -140,7 +140,7 @@ struct FaceLabView: View {
                         .foregroundStyle(.red)
                 }
 
-                CameraPreviewView(session: controller.camera.session, faces: controller.detectedFaces)
+                CameraPreviewView(image: controller.camera.currentFrame?.image, faces: controller.detectedFaces)
                     .frame(height: 300)
                     .background(Color.black.opacity(0.05))
                     .clipShape(RoundedRectangle(cornerRadius: 8))

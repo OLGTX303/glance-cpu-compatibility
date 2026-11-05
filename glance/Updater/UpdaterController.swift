@@ -56,11 +56,14 @@ final class UpdaterController {
     /// Safe to call even with a placeholder `SUPublicEDKey` — `SPUStandardUpdaterController` logs and alerts on a misconfigured
     /// Sparkle setup itself rather than throwing.
     func start() {
+        // A vendor update would overwrite the local CPU compatibility changes.
+        guard Bundle.main.object(forInfoDictionaryKey: "GlanceCPUCompatibility") as? Bool != true else { return }
         controller.startUpdater()
     }
 
     /// User-initiated "Check for Updates" — shows Sparkle's standard progress UI.
     func checkForUpdates() {
+        guard Bundle.main.object(forInfoDictionaryKey: "GlanceCPUCompatibility") as? Bool != true else { return }
         controller.checkForUpdates(nil)
     }
 }

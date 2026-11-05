@@ -36,6 +36,15 @@ enum KeychainError: LocalizedError {
 enum KeychainManager {
     nonisolated static let service = "com.jonathan.glance"
 
+    // The local build owns a separate group; it never claims the vendor's signing identity.
+    nonisolated private static func scoped(_ query: [String: Any]) -> [String: Any] {
+        guard Bundle.main.object(forInfoDictionaryKey: "GlanceCPUCompatibility") as? Bool == true else { return query }
+        var result = query
+        result[kSecUseDataProtectionKeychain as String] = true
+        result[kSecAttrAccessGroup as String] = "org.codex.local.GlanceCPU"
+        return result
+    }
+
     /// Attributes-only existence check — never prompts, even for access-controlled items.
     nonisolated static func exists(account: String) -> Bool {
         let query: [String: Any] = [
@@ -45,7 +54,7 @@ enum KeychainManager {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        let status = SecItemCopyMatching(scoped(query) as CFDictionary, &item)
         return status != errSecItemNotFound
     }
 
@@ -62,7 +71,7 @@ enum KeychainManager {
             query[kSecUseAuthenticationContext as String] = context
         }
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        let status = SecItemCopyMatching(scoped(query) as CFDictionary, &item)
         switch status {
         case errSecSuccess:
             guard let data = item as? Data else { throw KeychainError.unexpectedData }
@@ -88,7 +97,7 @@ enum KeychainManager {
         ]
 
         let updateStatus = SecItemUpdate(
-            itemQuery as CFDictionary,
+            scoped(itemQuery) as CFDictionary,
             [kSecValueData as String: data] as CFDictionary
         )
         switch updateStatus {
@@ -112,14 +121,14 @@ enum KeychainManager {
             addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         }
 
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        let status = SecItemAdd(scoped(addQuery) as CFDictionary, nil)
         if status == errSecSuccess { return }
         // Another save may have added the item after our update reported
         // not-found. Complete that competing replacement with an update instead
         // of surfacing an avoidable “item already exists” error.
         if status == errSecDuplicateItem {
             let retryStatus = SecItemUpdate(
-                itemQuery as CFDictionary,
+                scoped(itemQuery) as CFDictionary,
                 [kSecValueData as String: data] as CFDictionary
             )
             guard retryStatus == errSecSuccess else { throw KeychainError.osStatus(retryStatus) }
@@ -134,7 +143,7 @@ enum KeychainManager {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
-        let status = SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(scoped(query) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainError.osStatus(status)
         }

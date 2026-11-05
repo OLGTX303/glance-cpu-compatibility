@@ -18,6 +18,13 @@ nonisolated struct FaceRecognitionResult {
     let face: DetectedFace
 }
 
+nonisolated struct PreparedFace {
+    let alignedImage: CGImage
+    let alignmentTier: AlignmentTier
+    let quality: Float?
+    let face: DetectedFace
+}
+
 nonisolated enum FaceRecognitionPipelineError: LocalizedError {
     case noFaceDetected
     case alignmentFailed
@@ -64,6 +71,14 @@ final class FaceRecognitionPipeline {
 
     /// Aligns and embeds an already-chosen face; enrollment uses this to bypass the prominence filter so a too-small face reads as "move closer" rather than "nobody there".
     nonisolated func recognize(_ face: DetectedFace, in frame: CGImage) throws -> FaceRecognitionResult {
+        let prepared = try prepare(face, in: frame)
+        let embedding = try embedder.embedding(for: prepared.alignedImage)
+        return FaceRecognitionResult(embedding: embedding, alignedImage: prepared.alignedImage,
+                                     alignmentTier: prepared.alignmentTier, quality: prepared.quality, face: face)
+    }
+
+    /// Enrollment can inspect alignment, quality and pose without paying for an embedding it will discard.
+    nonisolated func prepare(_ face: DetectedFace, in frame: CGImage) throws -> PreparedFace {
         let inputImage: CGImage
         let tier: AlignmentTier
         if embedder.requiresAlignment {
@@ -80,8 +95,7 @@ final class FaceRecognitionPipeline {
             tier = .paddedCrop
         }
 
-        let embedding = try embedder.embedding(for: inputImage)
-        return FaceRecognitionResult(embedding: embedding, alignedImage: inputImage, alignmentTier: tier, quality: face.quality, face: face)
+        return PreparedFace(alignedImage: inputImage, alignmentTier: tier, quality: face.quality, face: face)
     }
 
     /// Largest face by area with no prominence cutoff — unlike `selectDominantFace`, so enrollment can tell "too far" apart from "no face".

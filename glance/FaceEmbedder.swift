@@ -46,6 +46,7 @@ struct VisionFeaturePrintEmbedder: FaceEmbedder {
 
     nonisolated func embedding(for face: CGImage) throws -> [Float] {
         let request = VNGenerateImageFeaturePrintRequest()
+        request.usesCPUOnly = true // CPU compatibility with the custom NVIDIA stack.
         let handler = VNImageRequestHandler(cgImage: face, options: [:])
         try handler.perform([request])
 

@@ -23,6 +23,7 @@ nonisolated enum DeviceBezelDetector {
     /// First-pass estimates, not validated against real footage — tune here if false positives/negatives show up.
     private static func makeRequest() -> VNDetectRectanglesRequest {
         let request = VNDetectRectanglesRequest()
+        request.usesCPUOnly = true // CPU compatibility with the custom NVIDIA stack.
         request.minimumConfidence = 0.6
         // Fraction of image area, not width/height.
         request.minimumSize = 0.15

@@ -379,6 +379,7 @@ final class OnboardingController {
     private(set) var currentPoseIndex = 0
     private(set) var capturedForCurrentPose = 0
     private(set) var faceDetected = false
+    private(set) var frameProcessingIssue: String?
     private(set) var currentYaw: Float?
     private(set) var currentPitch: Float?
     /// Whether the last-seen face read as too small to enroll reliably — swaps the pose
@@ -453,6 +454,7 @@ final class OnboardingController {
     /// completion line.
     var enrollmentInstruction: String {
         if enrollmentComplete { return "Face captured" }
+        if let issue = camera.errorMessage ?? frameProcessingIssue { return issue }
         if let excessiveTurn { return excessiveTurn.instruction }
         if isTooFar { return "Bring your face closer" }
         return currentPose?.instruction ?? ""
@@ -489,8 +491,9 @@ final class OnboardingController {
 
     private enum EnrollFrameOutcome: Sendable {
         case noFace
+        case processingFailure(String)
         case tooFar
-        case ready(FaceRecognitionResult)
+        case ready(PreparedFace)
     }
 
     var overallEnrollmentProgress: Double {
@@ -811,14 +814,25 @@ final class OnboardingController {
                 if Float(face.normalizedBoundingBox.width) < minimumWidth {
                     return EnrollFrameOutcome.tooFar
                 }
-                return EnrollFrameOutcome.ready(try pipeline.recognize(face, in: image))
+                return EnrollFrameOutcome.ready(try pipeline.prepare(face, in: image))
             } catch {
-                return EnrollFrameOutcome.noFace
+                return EnrollFrameOutcome.processingFailure(error.localizedDescription)
             }
         }.value
 
         switch outcome {
+        case .processingFailure(let message):
+            frameProcessingIssue = "Face processing: " + message
+            faceDetected = false
+            currentYaw = nil
+            currentPitch = nil
+            matchStreak = 0
+            poseHoldStartedAt = nil
+            isTooFar = false
+            excessiveTurn = nil
+            return
         case .noFace:
+            frameProcessingIssue = "No face detected. Centre your face in brighter light."
             faceDetected = false
             currentYaw = nil
             currentPitch = nil
@@ -828,6 +842,7 @@ final class OnboardingController {
             excessiveTurn = nil
             return
         case .tooFar:
+            frameProcessingIssue = nil
             faceDetected = true
             currentYaw = nil
             currentPitch = nil
@@ -837,7 +852,9 @@ final class OnboardingController {
             excessiveTurn = nil
             return
         case .ready(let result):
+            frameProcessingIssue = nil
             guard let yaw = result.face.yaw, let pitch = result.face.pitch else {
+                frameProcessingIssue = "Face detected; head-pose estimate unavailable."
                 faceDetected = true
                 currentYaw = nil
                 currentPitch = nil
@@ -862,7 +879,7 @@ final class OnboardingController {
     }
 
     private func processMatchedEnrollFrame(
-        _ result: FaceRecognitionResult,
+        _ result: PreparedFace,
         yaw: Float,
         pitch: Float,
         pose: EnrollmentPose
@@ -883,10 +900,16 @@ final class OnboardingController {
         let poseOK = poseMatches(yaw: yaw, pitch: pitch, pose: pose, widened: widened)
         guard qualityOK, alignmentOK, !isTooFar,
               excessiveTurnDirection(yaw: yaw, pitch: pitch) == nil, poseOK else {
+            if !alignmentOK {
+                frameProcessingIssue = "Keep both eyes and your mouth visible; turn a little less."
+            } else if !qualityOK {
+                frameProcessingIssue = "Move into even light and hold your head still."
+            }
             matchStreak = 0
             poseHoldStartedAt = nil
             return
         }
+        frameProcessingIssue = "Good position — hold still"
 
         if poseHoldStartedAt == nil {
             poseHoldStartedAt = .now
@@ -897,8 +920,21 @@ final class OnboardingController {
         guard matchStreak >= requiredMatchStreak else { return }
         matchStreak = 0
 
+        let embedder = pipeline.embedder
+        let alignedImage = result.alignedImage
+        let embedding: [Float]
+        do {
+            embedding = try await Task.detached(priority: .userInitiated) {
+                try embedder.embedding(for: alignedImage)
+            }.value
+        } catch {
+            frameProcessingIssue = "Face processing: " + error.localizedDescription
+            poseHoldStartedAt = nil
+            return
+        }
+        guard step == .enroll, currentPose == pose, !enrollmentComplete else { return }
         collectedSamples.append(CollectedSample(
-            embedding: result.embedding,
+            embedding: embedding,
             pose: pose,
             quality: result.quality,
             capturedAt: Date()
